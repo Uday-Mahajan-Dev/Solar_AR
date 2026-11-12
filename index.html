@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>SolarAR</title>
   <script type="importmap">
     {
@@ -23,7 +23,6 @@
       overscroll-behavior: none;
       background: #000;
     }
-    /* Keep opacity: 1 so Chromium never throttles MindAR's video frame reader */
     #ar-container {
       position: fixed;
       inset: 0;
@@ -43,7 +42,6 @@
     #ar-container canvas {
       display: none !important;
     }
-    /* 2D Canvas renders the live camera feed reliably on every frame */
     #camera-feed {
       position: fixed;
       inset: 0;
@@ -53,7 +51,6 @@
       display: block;
       pointer-events: none;
     }
-    /* mix-blend-mode: screen makes all (0,0,0) black pixels from Unity 100% see-through */
     #unity-canvas {
       position: fixed;
       inset: 0;
@@ -95,12 +92,13 @@
 
     const canvas = document.querySelector('#unity-canvas');
     const camCanvas = document.querySelector('#camera-feed');
-    const camCtx = camCanvas.getContext('2d');
+    // alpha: false speeds up 2D canvas compositing on mobile GPUs
+    const camCtx = camCanvas.getContext('2d', { alpha: false, desynchronized: true });
     const loadingOverlay = document.querySelector('#loading-overlay');
     const loadingText = document.querySelector('#loading-text');
 
     const RECEIVER = 'MindARManager';
-    const log = (...args) => console.log('[SolarAR-v4]', ...args);
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
     const config = {
       dataUrl: "Build/SolarAR3.data.unityweb",
@@ -110,65 +108,83 @@
       companyName: "DefaultCompany",
       productName: "SolarAR",
       productVersion: "0.1.0",
+      // Cap DPR on mobile so Unity doesn't render at 3x Retina resolution
+      devicePixelRatio: isMobile ? Math.min(window.devicePixelRatio || 1, 1.25) : Math.min(window.devicePixelRatio || 1, 1.5)
     };
+
+    let cachedRect = { cw: 0, ch: 0, dx: 0, dy: 0, dw: 0, dh: 0, vw: 0, vh: 0 };
 
     function drawCameraCover(video) {
       if (!video || video.readyState < 2 || video.videoWidth === 0) return;
-      const cw = window.innerWidth;
-      const ch = window.innerHeight;
-      if (camCanvas.width !== cw || camCanvas.height !== ch) {
-        camCanvas.width = cw;
-        camCanvas.height = ch;
-      }
+      // Render background camera at 0.75x on mobile for fast memory bandwidth
+      const scaleFactor = isMobile ? 0.75 : 1.0;
+      const cw = Math.round(window.innerWidth * scaleFactor);
+      const ch = Math.round(window.innerHeight * scaleFactor);
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-      const scale = Math.max(cw / vw, ch / vh);
-      const dw = vw * scale;
-      const dh = vh * scale;
-      camCtx.drawImage(video, (cw - dw) * 0.5, (ch - dh) * 0.5, dw, dh);
+
+      if (cachedRect.cw !== cw || cachedRect.ch !== ch || cachedRect.vw !== vw || cachedRect.vh !== vh) {
+        camCanvas.width = cw;
+        camCanvas.height = ch;
+        const scale = Math.max(cw / vw, ch / vh);
+        const dw = vw * scale;
+        const dh = vh * scale;
+        cachedRect = { cw, ch, vw, vh, dw, dh, dx: (cw - dw) * 0.5, dy: (ch - dh) * 0.5 };
+      }
+      camCtx.drawImage(video, cachedRect.dx, cachedRect.dy, cachedRect.dw, cachedRect.dh);
     }
 
     async function startAR(unityInstance) {
       const mindarThree = new MindARThree({
         container: document.querySelector('#ar-container'),
         imageTargetSrc: './targets.mind',
+        // Lower internal filter lag and CPU load on mobile
+        filterMinCF: 0.001,
+        filterBeta: 10,
         uiLoading: "no",
         uiScanning: "no",
         uiError: "no"
       });
 
       const { renderer, camera } = mindarThree;
+      // Reduce MindAR's unused Three.js renderer pixel ratio to 1
+      renderer.setPixelRatio(1);
+
       const anchor = mindarThree.addAnchor(0);
       let isTracking = false;
       let lastPose = '';
+      let lastSendTime = 0;
 
       anchor.onTargetFound = () => {
         isTracking = true;
-        log('TARGET FOUND! Sending pose to Unity...');
         unityInstance.SendMessage(RECEIVER, 'OnTargetFound', '');
       };
 
       anchor.onTargetLost = () => {
         isTracking = false;
         lastPose = '';
-        log('TARGET LOST');
         unityInstance.SendMessage(RECEIVER, 'OnTargetLost', '');
       };
 
       await mindarThree.start();
       const video = document.querySelector('#ar-container video');
-      log('Camera active:', video ? `${video.videoWidth}x${video.videoHeight}` : 'missing');
 
-      renderer.setAnimationLoop(() => {
+      renderer.setAnimationLoop((now) => {
         drawCameraCover(video);
+
         if (!isTracking || !anchor.group.visible) return;
+        // Throttle JS->WASM bridge to ~30fps on mobile (Unity lerps smoothly between updates)
+        if (isMobile && now - lastSendTime < 32) return;
+
         anchor.group.updateMatrixWorld();
         const e = anchor.group.matrixWorld.elements;
         let pose = '';
-        for (let i = 0; i < 16; i++) pose += e[i].toPrecision(7) + ',';
-        pose += camera.fov.toPrecision(6);
+        for (let i = 0; i < 16; i++) pose += e[i].toFixed(4) + ',';
+        pose += camera.fov.toFixed(2);
         if (pose === lastPose) return;
+
         lastPose = pose;
+        lastSendTime = now;
         unityInstance.SendMessage(RECEIVER, 'UpdateTargetPose', pose);
       });
     }
@@ -176,12 +192,9 @@
     createUnityInstance(canvas, config, (progress) => {
       loadingText.textContent = `Loading WebAR Solar System... ${Math.round(progress * 100)}%`;
     }).then(async (unityInstance) => {
-      log('Unity instance ready');
-      loadingText.textContent = 'Starting camera...';
-      await startAR(unityInstance);
       loadingOverlay.style.display = 'none';
+      await startAR(unityInstance);
     }).catch((err) => {
-      console.error('[SolarAR-v4]', err);
       loadingText.textContent = "Error: " + err;
     });
   </script>
