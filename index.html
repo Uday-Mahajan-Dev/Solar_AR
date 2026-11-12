@@ -17,38 +17,37 @@
     html, body {
       margin: 0;
       padding: 0;
-      width: 100vw;
-      height: 100vh;
+      width: 100%;
+      height: 100%;
       overflow: hidden;
       overscroll-behavior: none;
       background: #000;
     }
+    /* Off-DOM-viewport container for MindAR's internal video/three elements */
     #ar-container {
-      position: relative;
-      width: 100vw;
-      height: 100vh;
-      z-index: 1;
-      overflow: hidden;
-    }
-    #ar-container video {
-      position: absolute !important;
-      top: 0 !important;
-      left: 0 !important;
-      width: 100vw !important;
-      height: 100vh !important;
-      object-fit: cover !important;
-      z-index: 1 !important;
-      opacity: 0.999;
-      transform: translateZ(0);
-      will-change: transform;
-    }
-    #ar-container canvas {
-      display: none !important;
-    }
-    #unity-canvas {
       position: fixed;
       top: 0;
       left: 0;
+      width: 100vw;
+      height: 100vh;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+    /* 2D Canvas that paints the live camera frame reliably every RAF tick (bypasses Chromium video overlay stall) */
+    #camera-feed {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 1;
+      display: block;
+      pointer-events: none;
+    }
+    /* Transparent Unity WebGL canvas on top */
+    #unity-canvas {
+      position: fixed;
+      inset: 0;
       width: 100vw !important;
       height: 100vh !important;
       z-index: 2;
@@ -77,6 +76,7 @@
 </head>
 <body>
   <div id="ar-container"></div>
+  <canvas id="camera-feed"></canvas>
   <canvas id="unity-canvas" tabindex="-1"></canvas>
   <div id="loading-overlay">
     <div id="loading-text">Loading WebAR Solar System... 0%</div>
@@ -98,6 +98,8 @@
     import { MindARThree } from 'mindar-image-three';
 
     const canvas = document.querySelector('#unity-canvas');
+    const camCanvas = document.querySelector('#camera-feed');
+    const camCtx = camCanvas.getContext('2d');
     const loadingOverlay = document.querySelector('#loading-overlay');
     const loadingText = document.querySelector('#loading-text');
 
@@ -115,6 +117,24 @@
       productName: "SolarAR",
       productVersion: "0.1.0",
     };
+
+    function drawCameraCover(video) {
+      if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+      const cw = window.innerWidth;
+      const ch = window.innerHeight;
+      if (camCanvas.width !== cw || camCanvas.height !== ch) {
+        camCanvas.width = cw;
+        camCanvas.height = ch;
+      }
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const scale = Math.max(cw / vw, ch / vh);
+      const dw = vw * scale;
+      const dh = vh * scale;
+      const dx = (cw - dw) * 0.5;
+      const dy = (ch - dh) * 0.5;
+      camCtx.drawImage(video, dx, dy, dw, dh);
+    }
 
     async function startAR(unityInstance) {
       const mindarThree = new MindARThree({
@@ -147,24 +167,18 @@
       const t0 = performance.now();
       await mindarThree.start();
 
-      // Force synchronous reflow so Chromium paints the video layer behind the WebGL canvas immediately.
       const video = document.querySelector('#ar-container video');
       if (video) {
         log(`MindAR started in ${Math.round(performance.now() - t0)} ms; camera ${video.videoWidth}x${video.videoHeight}, three.js fov ${camera.fov.toFixed(2)}`);
-        const forceVideoPaint = () => {
-          video.style.display = 'none';
-          void video.offsetHeight;
-          video.style.display = 'block';
-          video.play().catch(() => {});
-          window.dispatchEvent(new Event('resize'));
-        };
-        if (video.readyState >= 2) forceVideoPaint();
-        else video.addEventListener('loadeddata', forceVideoPaint, { once: true });
       } else {
         logError('MindAR started but no <video> element was found in #ar-container');
       }
 
       renderer.setAnimationLoop(() => {
+        // 1. Paint the live camera frame onto #camera-feed every frame (never stalls)
+        drawCameraCover(video);
+
+        // 2. Stream target pose to Unity when tracking
         if (!isTracking || !anchor.group.visible) return;
         anchor.group.updateMatrixWorld();
         const e = anchor.group.matrixWorld.elements;
