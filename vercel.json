@@ -1,0 +1,65 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "headers": [
+    {
+      "source": "/Build/(.*)\\.js\\.br",
+      "headers": [
+        { "key": "Content-Encoding", "value": "br" },
+        { "key": "Content-Type", "value": "application/javascript" }
+      ]
+    },
+    {
+      "source": "/Build/(.*)\\.wasm\\.br",
+      "headers": [
+        { "key": "Content-Encoding", "value": "br" },
+        { "key": "Content-Type", "value": "application/wasm" }
+      ]
+    },
+    {
+      "source": "/Build/(.*)\\.(data|symbols\\.json)\\.br",
+      "headers": [
+        { "key": "Content-Encoding", "value": "br" },
+        { "key": "Content-Type", "value": "application/octet-stream" }
+      ]
+    },
+    {
+      "source": "/Build/(.*)\\.js\\.gz",
+      "headers": [
+        { "key": "Content-Encoding", "value": "gzip" },
+        { "key": "Content-Type", "value": "application/javascript" }
+      ]
+    },
+    {
+      "source": "/Build/(.*)\\.wasm\\.gz",
+      "headers": [
+        { "key": "Content-Encoding", "value": "gzip" },
+        { "key": "Content-Type", "value": "application/wasm" }
+      ]
+    },
+    {
+      "source": "/Build/(.*)\\.(data|symbols\\.json)\\.gz",
+      "headers": [
+        { "key": "Content-Encoding", "value": "gzip" },
+        { "key": "Content-Type", "value": "application/octet-stream" }
+      ]
+    },
+    {
+      "source": "/Build/(.*)\\.wasm",
+      "headers": [
+        { "key": "Content-Type", "value": "application/wasm" }
+      ]
+    },
+    {
+      "source": "/Build/(.*)\\.unityweb",
+      "headers": [
+        { "key": "Content-Type", "value": "application/octet-stream" }
+      ]
+    },
+    {
+      "source": "/(.*)\\.mind",
+      "headers": [
+        { "key": "Content-Type", "value": "application/octet-stream" }
+      ]
+    }
+  ]
+}
