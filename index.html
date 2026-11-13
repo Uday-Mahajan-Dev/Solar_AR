@@ -23,14 +23,12 @@
       overscroll-behavior: none;
       background: #000;
     }
-    /* Direct hardware video layer — zero 2D canvas copying */
     #ar-container {
       position: fixed;
       inset: 0;
       width: 100vw;
       height: 100vh;
-      z-index: 1;
-      overflow: hidden;
+      z-index: 0;
       pointer-events: none;
     }
     #ar-container video {
@@ -40,17 +38,20 @@
       width: 100% !important;
       height: 100% !important;
       object-fit: cover !important;
-      z-index: 1 !important;
     }
-    /* Tiny 1x1 canvas keeps MindAR's vision worker alive with near-zero GPU cost */
     #ar-container canvas {
-      position: absolute !important;
-      width: 1px !important;
-      height: 1px !important;
-      opacity: 0.01 !important;
-      pointer-events: none !important;
+      display: none !important;
     }
-    /* True alpha-transparent Unity canvas — no expensive mix-blend-mode */
+    #camera-feed {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 1;
+      display: block;
+      pointer-events: none;
+    }
+    /* mix-blend-mode: screen eliminates Unity's opaque black clear color */
     #unity-canvas {
       position: fixed;
       inset: 0;
@@ -58,6 +59,7 @@
       height: 100vh !important;
       z-index: 2;
       background: transparent !important;
+      mix-blend-mode: screen;
       pointer-events: auto;
       touch-action: none;
       -webkit-user-select: none;
@@ -92,33 +94,20 @@
 </head>
 <body>
   <div id="ar-container"></div>
+  <canvas id="camera-feed"></canvas>
   <canvas id="unity-canvas" tabindex="-1"></canvas>
   <div id="ar-status">Initializing AR...</div>
   <div id="loading-overlay">
     <div id="loading-text">Loading WebAR Solar System... 0%</div>
   </div>
 
-  <script>
-    const unityCanvas = document.getElementById('unity-canvas');
-    const origGetContext = unityCanvas.getContext.bind(unityCanvas);
-    unityCanvas.getContext = function (type, attrs) {
-      if (type === 'webgl' || type === 'webgl2') {
-        attrs = Object.assign({}, attrs, {
-          alpha: true,
-          premultipliedAlpha: false,
-          antialias: false,
-          powerPreference: 'high-performance'
-        });
-      }
-      return origGetContext(type, attrs);
-    };
-  </script>
-
   <script src="Build/SolarAR3.loader.js"></script>
   <script type="module">
     import { MindARThree } from 'mindar-image-three';
 
     const canvas = document.querySelector('#unity-canvas');
+    const camCanvas = document.querySelector('#camera-feed');
+    const camCtx = camCanvas.getContext('2d', { alpha: false, desynchronized: true });
     const loadingOverlay = document.querySelector('#loading-overlay');
     const loadingText = document.querySelector('#loading-text');
     const statusBadge = document.querySelector('#ar-status');
@@ -134,9 +123,31 @@
       companyName: "DefaultCompany",
       productName: "SolarAR",
       productVersion: "0.1.0",
-      // Lock 1.0 DPR on mobile so GPU shades 1x pixels instead of 4x-9x Retina pixels
+      // 1.0 DPR on mobile cuts fragment shader work by 4x-9x
       devicePixelRatio: isMobile ? 1 : Math.min(window.devicePixelRatio || 1, 1.5)
     };
+
+    let cachedRect = { cw: 0, ch: 0, dx: 0, dy: 0, dw: 0, dh: 0, vw: 0, vh: 0 };
+
+    function drawCameraCover(video) {
+      if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+      // 0.5x scale on mobile copies 75% fewer pixels per frame while looking crisp on camera feed
+      const scaleFactor = isMobile ? 0.5 : 1.0;
+      const cw = Math.round(window.innerWidth * scaleFactor);
+      const ch = Math.round(window.innerHeight * scaleFactor);
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+
+      if (cachedRect.cw !== cw || cachedRect.ch !== ch || cachedRect.vw !== vw || cachedRect.vh !== vh) {
+        camCanvas.width = cw;
+        camCanvas.height = ch;
+        const scale = Math.max(cw / vw, ch / vh);
+        const dw = vw * scale;
+        const dh = vh * scale;
+        cachedRect = { cw, ch, vw, vh, dw, dh, dx: (cw - dw) * 0.5, dy: (ch - dh) * 0.5 };
+      }
+      camCtx.drawImage(video, cachedRect.dx, cachedRect.dy, cachedRect.dw, cachedRect.dh);
+    }
 
     async function startAR(unityInstance) {
       const mindarThree = new MindARThree({
@@ -148,8 +159,7 @@
         uiError: "no"
       });
 
-      const { renderer, scene, camera } = mindarThree;
-      // Keep MindAR's Three.js backing buffer tiny (1x1) since Unity renders all 3D visuals
+      const { renderer, camera } = mindarThree;
       renderer.setPixelRatio(0.1);
 
       const anchor = mindarThree.addAnchor(0);
@@ -174,21 +184,14 @@
 
       await mindarThree.start();
       statusBadge.textContent = 'Point camera at target image...';
-
-      // Force synchronous reflow so the native <video> element paints immediately behind Unity
       const video = document.querySelector('#ar-container video');
-      if (video) {
-        video.style.display = 'none';
-        void video.offsetHeight;
-        video.style.display = 'block';
-        video.play().catch(() => {});
-      }
 
       renderer.setAnimationLoop((now) => {
-        renderer.render(scene, camera);
+        // Notice: NO renderer.render(scene, camera) here — saves an entire WebGL pass on mobile
+        drawCameraCover(video);
 
         if (!isTracking || !anchor.group.visible) return;
-        // Send pose updates at 25 Hz on mobile; Unity's poseSmoothTime (0.06s) interpolates smoothly
+        // 25 Hz pose updates on mobile; Unity interpolates smoothly at 60fps
         if (isMobile && now - lastSendTime < 40) return;
 
         anchor.group.updateMatrixWorld();
